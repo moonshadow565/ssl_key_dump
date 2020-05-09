@@ -1,4 +1,3 @@
-static_assert(sizeof(void*) == 4, "Compile in 32bit mode");
 #include <algorithm>
 #include <chrono>
 #include <cstdarg>
@@ -22,11 +21,18 @@ static_assert(sizeof(void*) == 4, "Compile in 32bit mode");
 #endif
 #define assert(what) do { if (!(what)) { MessageBoxA(nullptr, #what, __func__, MB_ICONERROR); exit(1); } } while(false)
 
-static void log_key_register(void const* ssl) noexcept {
-    using cb_t = void(*)(void const* ssl, char const* line);
-    auto const ctx = *(void* const*)((char const*)ssl + 1424);
-    auto const cb = (cb_t*)((char*)ctx + 540);
-    *cb = [](void const*, char const* line) { 
+struct SSL_CTX {
+    char pad[540]; // FIXME: goto openssl source find this offset for 64bit
+    void (*callback)(SSL_CTX* ctx, char const* line);
+};
+
+struct SSL {
+    char pad[1424]; // FIXME: goto openssl source find this offset for 64bit
+    SSL_CTX* ctx;
+};
+
+static void log_key_register(SSL* ssl) noexcept {
+    ssl->ctx->callback = [](void const*, char const* line) { 
         static auto mutex = std::mutex{};
         auto lock = std::lock_guard<std::mutex>{ mutex };
         static auto file = std::ofstream{ "C:/Riot Games/ssl_keylog.txt", std::ios::binary | std::ios::app };
@@ -72,17 +78,22 @@ static uintptr_t find_call(std::vector<char> const& data, char const(&pat)[S]) n
 
 template<size_t I>
 static bool hook_module(char const* name) noexcept {
-    using hook_t = void(*)(void* s, int fd);
+    using ssl_set_fd_t = void(*)(SSL* s, int fd);
     auto const base = (uintptr_t)GetModuleHandleA(name);
     if (!base) {
         return false;
     }
     auto const data = dump_data(base);
-    auto const offset = find_call(data, "\xFF\xB5\x3C\xFE\xFF\xFF\xFF\x70\x04\xE8");
-    assert(offset != 0);
+    constexpr auto pattern = sizeof(void*) == 4
+                             ? "\xFF\xB5\x3C\xFE\xFF\xFF\xFF\x70\x04\xE8"
+                             : "\x8B\x54\x24\x78\x48\x8B\x49\x08\xE8";
+    auto const offset = find_call(data, pattern);
+    if (!offset) {
+        return false;
+    }
     auto const target = (hook_t)(base + offset);
-    static hook_t org = nullptr;
-    static hook_t hook = [](void* ssl, int fd) {
+    static ssl_set_fd_t org = nullptr;
+    static ssl_set_fd_t hook = [](SSL* ssl, int fd) {
         log_key_register(ssl);
         org(ssl, fd);
     };
@@ -111,6 +122,7 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
         assert(MH_Initialize() == MH_OK);
         hook_module<0>(nullptr);
         hook_module_wait<1>("Foundation.dll", 30000);
+        hook_module_wait<2>("FoundationMobile.dll", 30000);
     }
     return TRUE;
 }
