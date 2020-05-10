@@ -22,17 +22,17 @@
 #define assert(what) do { if (!(what)) { MessageBoxA(nullptr, #what, __func__, MB_ICONERROR); exit(1); } } while(false)
 
 struct SSL_CTX {
-    char pad[540]; // FIXME: goto openssl source find this offset for 64bit
+    char pad[sizeof(void*) == 4 ? 540 : 904];
     void (*keylog_callback)(SSL_CTX* ctx, char const* line);
 };
 
 struct SSL {
-    char pad[1424]; // FIXME: goto openssl source find this offset for 64bit
+    char pad[1424];
     SSL_CTX* ctx;
 };
 
 static void log_key_register(SSL* ssl) noexcept {
-    ssl->ctx->keylog_callback = [](void const*, char const* line) { 
+    ssl->ctx->keylog_callback = [](SSL_CTX*, char const* line) { 
         static auto mutex = std::mutex{};
         auto lock = std::lock_guard<std::mutex>{ mutex };
         static auto file = std::ofstream{ "C:/Riot Games/ssl_keylog.txt", std::ios::binary | std::ios::app };
@@ -84,14 +84,13 @@ static bool hook_module(char const* name) noexcept {
         return false;
     }
     auto const data = dump_data(base);
-    constexpr auto pattern = sizeof(void*) == 4
-                             ? "\xFF\xB5\x3C\xFE\xFF\xFF\xFF\x70\x04\xE8"
-                             : "\x8B\x54\x24\x78\x48\x8B\x49\x08\xE8";
-    auto const offset = find_call(data, pattern);
+    auto const offset = sizeof(void*) == 4
+						? find_call(data, "\xFF\xB5\x3C\xFE\xFF\xFF\xFF\x70\x04\xE8")
+						: find_call(data, "\x8B\x54\x24\x78\x48\x8B\x49\x08\xE8");
     if (!offset) {
         return false;
     }
-    auto const target = (hook_t)(base + offset);
+    auto const target = (ssl_set_fd_t)(base + offset);
     static ssl_set_fd_t org = nullptr;
     static ssl_set_fd_t hook = [](SSL* ssl, int fd) {
         log_key_register(ssl);
