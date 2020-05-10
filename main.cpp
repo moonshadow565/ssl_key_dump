@@ -23,7 +23,7 @@
 
 struct SSL_CTX {
     char pad[540]; // FIXME: goto openssl source find this offset for 64bit
-    void (*callback)(SSL_CTX* ctx, char const* line);
+    void (*keylog_callback)(SSL_CTX* ctx, char const* line);
 };
 
 struct SSL {
@@ -32,7 +32,7 @@ struct SSL {
 };
 
 static void log_key_register(SSL* ssl) noexcept {
-    ssl->ctx->callback = [](void const*, char const* line) { 
+    ssl->ctx->keylog_callback = [](void const*, char const* line) { 
         static auto mutex = std::mutex{};
         auto lock = std::lock_guard<std::mutex>{ mutex };
         static auto file = std::ofstream{ "C:/Riot Games/ssl_keylog.txt", std::ios::binary | std::ios::app };
