@@ -13,34 +13,39 @@
 #include <thread>
 #include <vector>
 #include "MinHook.h"
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <Windows.h>
+#ifdef assert
+#undef assert
+#endif
 #ifdef assert
 #undef assert
 #endif
 #define assert(what) do { if (!(what)) { MessageBoxA(nullptr, #what, __func__, MB_ICONERROR); exit(1); } } while(false)
 
 struct SSL_CTX {
-    char pad[540]; // FIXME: goto openssl source find this offset for 64bit
+    char pad[sizeof(void*) == 4 ? 540 : 904]; // FIXME: this can change in different openssl versions
     void (*keylog_callback)(SSL_CTX* ctx, char const* line);
 };
 
 struct SSL {
-    char pad[1424]; // FIXME: goto openssl source find this offset for 64bit
+    char pad[1424]; // FIXME: this can change in different openssl versions
     SSL_CTX* ctx;
 };
 
-static void log_key_register(SSL* ssl) noexcept {
-    ssl->ctx->keylog_callback = [](void const*, char const* line) { 
-        static auto mutex = std::mutex{};
-        auto lock = std::lock_guard<std::mutex>{ mutex };
-        static auto file = std::ofstream{ "C:/Riot Games/ssl_keylog.txt", std::ios::binary | std::ios::app };
-        file.write(line, strlen(line));
-        file.put('\n');
-        file.flush();
-    };
-}
+static void keylog_callback(SSL_CTX*, char const* line) {
+    static auto mutex = std::mutex{};
+    auto lock = std::lock_guard<std::mutex>{ mutex };
+    static auto file = std::ofstream{ "C:/Riot Games/ssl_keylog.txt", std::ios::binary | std::ios::app };
+    file.write(line, strlen(line));
+    file.put('\n');
+    file.flush();
+};
 
 static auto dump_data(uintptr_t base) noexcept {
     auto const handle = GetCurrentProcess();
@@ -76,6 +81,14 @@ static uintptr_t find_call(std::vector<char> const& data, char const(&pat)[S]) n
     return (uintptr_t)(result + offset);
 }
 
+static auto find_set_set_fd(std::vector<char> const& data) noexcept {
+    if constexpr (sizeof(void*) == 4) {
+        return find_call(data, "\xFF\xB5\x3C\xFE\xFF\xFF\xFF\x70\x04\xE8");
+    } else {
+        return find_call(data, "\x8B\x54\x24\x78\x48\x8B\x49\x08\xE8");
+    }
+}
+
 template<size_t I>
 static bool hook_module(char const* name) noexcept {
     using ssl_set_fd_t = void(*)(SSL* s, int fd);
@@ -84,17 +97,14 @@ static bool hook_module(char const* name) noexcept {
         return false;
     }
     auto const data = dump_data(base);
-    constexpr auto pattern = sizeof(void*) == 4
-                             ? "\xFF\xB5\x3C\xFE\xFF\xFF\xFF\x70\x04\xE8"
-                             : "\x8B\x54\x24\x78\x48\x8B\x49\x08\xE8";
-    auto const offset = find_call(data, pattern);
-    if (!offset) {
-        return false;
-    }
-    auto const target = (hook_t)(base + offset);
+    auto const offset = find_set_set_fd(data);
+    assert(offset != 0);
+    auto const target = (ssl_set_fd_t)(base + offset);
     static ssl_set_fd_t org = nullptr;
     static ssl_set_fd_t hook = [](SSL* ssl, int fd) {
-        log_key_register(ssl);
+        assert(ssl->ctx);
+        assert(!ssl->ctx->keylog_callback || ssl->ctx->keylog_callback == keylog_callback);
+        ssl->ctx->keylog_callback = keylog_callback;
         org(ssl, fd);
     };
     assert(MH_CreateHook((void*)target, (void*)hook, (void**)&org) == MH_OK);
