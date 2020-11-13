@@ -26,6 +26,7 @@
 #ifdef assert
 #undef assert
 #endif
+
 #define assert(what) do { if (!(what)) { MessageBoxA(nullptr, #what, __func__, MB_ICONERROR); exit(1); } } while(false)
 
 struct SSL_CTX {
@@ -64,26 +65,51 @@ static auto dump_data(uintptr_t base) noexcept {
     return result;
 }
 
-template<size_t S>
-static uintptr_t find_call(std::vector<char> const& data, char const(&pat)[S]) noexcept {
-    constexpr auto pat_size = S - 1; // remove null terminator
-    auto const data_begin = data.data();
-    auto const data_end = data.data() + data.size();
-    auto const pat_begin = &pat[0];
-    auto const pat_end = &pat[pat_size];
+static uintptr_t find_call(std::vector<char> const& data, std::string_view pat) noexcept {
+    auto pat_begin = pat.data();
+    auto pat_end = pat.data() + pat.size();
+    auto data_begin = data.data();
+    auto data_end = data.data() + data.size();
     auto const i = std::search(data_begin, data_end, std::boyer_moore_horspool_searcher(pat_begin, pat_end));
     if (i == data_end) {
         return 0u;
     }
     auto offset = int32_t{0};
-    memcpy(&offset, i + pat_size, sizeof(offset));
-    auto const result = (int32_t)(i + pat_size + sizeof(offset) - data_begin);
+    memcpy(&offset, i + pat.size(), sizeof(offset));
+    auto const result = (int32_t)((i - data_begin) + pat.size() + sizeof(offset));
     return (uintptr_t)(result + offset);
 }
 
+static std::string load_pattern_from_file() {
+    std::string result = {};
+    if (auto file = fopen("C:/Riot Games/ssl_keylog_pattern.txt", "rb")) {
+        for (uint32_t number = 0; fscanf(file, "%02X", &number) == 1; ) {
+            result.push_back((char)(uint8_t)number);
+        }
+        fclose(file);
+    }
+    return result;
+}
+
+static std::string load_pattern() {
+    auto from_file = load_pattern_from_file();
+    if (!from_file.empty()) {
+        return from_file;
+    } else {
+        if constexpr (sizeof(void*) == 4) {
+            return "\xFF\x74\x24\x40\xFF\x73\x04\xE8";
+        } else {
+            return "\x8B\x54\x24\x78\x48\x8B\x49\x08\xE8";
+        }
+    }
+}
+
 static auto find_set_set_fd(std::vector<char> const& data) noexcept {
+    static std::string pattern = load_pattern();
+    return find_call(data, pattern);
+
     if constexpr (sizeof(void*) == 4) {
-        return find_call(data, "\xFF\xB5\x3C\xFE\xFF\xFF\xFF\x70\x04\xE8");
+
     } else {
         return find_call(data, "\x8B\x54\x24\x78\x48\x8B\x49\x08\xE8");
     }
