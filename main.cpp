@@ -107,12 +107,6 @@ static std::string load_pattern() {
 static auto find_set_set_fd(std::vector<char> const& data) noexcept {
     static std::string pattern = load_pattern();
     return find_call(data, pattern);
-
-    if constexpr (sizeof(void*) == 4) {
-
-    } else {
-        return find_call(data, "\x8B\x54\x24\x78\x48\x8B\x49\x08\xE8");
-    }
 }
 
 template<size_t I>
