@@ -22,11 +22,28 @@
 
 static std::regex patterns[] = {
     #if UINTPTR_MAX > 0xFFFFFFFFF
-    std::regex { R"(\x40\x57\x41\x55\x41\x56\x41\x57.{4,20})"
+    std::regex { R"(\x40\x57)"
+                 R"(\x41\x55)"
+                 R"(\x41\x56)"
+                 R"(\x41\x57)"
+                 R"(.{4,20})"
                  R"(\x48\x8B\x82(....))"
-                 R"(\x4D\x8B\xF1\x4D\x8B\xF8\x4C\x8B\xEA\x48\x8B\xF9\x48\x83\xB8(....)\x00\x75\x11)" },
+                 R"(\x4D\x8B\xF1)"
+                 R"(\x4D\x8B\xF8)"
+                 R"(\x4C\x8B\xEA)"
+                 R"(\x48\x8B\xF9)"
+                 R"(\x48\x83\xB8(....)\x00)"
+                 R"(\x75\x11)"
+    },
     #else
-    std::regex { R"(\x55\x8B\xEC.{3,21}\x8B\x45\x0C\x8B\x80(....)\x83\xB8(....)\x00\x75\x09)" },
+    std::regex { R"(\x55)"
+                 R"(\x8B\xEC)"
+                 R"(.{3,21})"
+                 R"(\x8B\x45\x0C)"
+                 R"(\x8B\x80(....))"
+                 R"(\x83\xB8(....))"
+                 R"(\x00\x75\x09)"
+    },
     #endif
 };
 
