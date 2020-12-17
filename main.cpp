@@ -1,15 +1,8 @@
-#include <algorithm>
 #include <chrono>
-#include <cstdarg>
 #include <cstring>
-#include <cstdio>
-#include <functional>
 #include <fstream>
 #include <mutex>
-#include <map>
-#include <memory>
-#include <string>
-#include <string_view>
+#include <regex>
 #include <thread>
 #include <vector>
 #include "MinHook.h"
@@ -23,32 +16,44 @@
 #ifdef assert
 #undef assert
 #endif
-#ifdef assert
-#undef assert
-#endif
-
 #define assert(what) do { if (!(what)) { MessageBoxA(nullptr, #what, __func__, MB_ICONERROR); exit(1); } } while(false)
 
-struct SSL_CTX {
-    char pad[sizeof(void*) == 4 ? 540 : 904]; // FIXME: this can change in different openssl versions
-    void (*keylog_callback)(SSL_CTX* ctx, char const* line);
+/// Config
+
+static std::regex patterns[] = {
+    #if UINTPTR_MAX > 0xFFFFFFFFF
+    std::regex { R"(\x40\x57\x41\x55\x41\x56\x41\x57.{4,20})"
+                 R"(\x48\x8B\x82(....))"
+                 R"(\x4D\x8B\xF1\x4D\x8B\xF8\x4C\x8B\xEA\x48\x8B\xF9\x48\x83\xB8(....)\x00\x75\x11)" },
+    #else
+    std::regex { R"(\x55\x8B\xEC.{3,21}\x8B\x45\x0C\x8B\x80(....)\x83\xB8(....)\x00\x75\x09)" },
+    #endif
 };
 
-struct SSL {
-    char pad[1424]; // FIXME: this can change in different openssl versions
-    SSL_CTX* ctx;
+static char const* modules[] = {
+    nullptr,
+    "RiotGamesApi.dll",
+    "RiotClientFoundation.dll",
 };
 
-static void keylog_callback(SSL_CTX*, char const* line) {
+constexpr inline auto modules_wait_interval = 50;
+
+constexpr inline auto modules_wait_time = 30000;
+
+constexpr inline auto log_file_name = "C:/Riot Games/ssl_keylog.txt";
+
+/// Hooking
+
+static void log_func(char*, char const* line) {
     static auto mutex = std::mutex{};
     auto lock = std::lock_guard<std::mutex>{ mutex };
-    static auto file = std::ofstream{ "C:/Riot Games/ssl_keylog.txt", std::ios::binary | std::ios::app };
+    static auto file = std::ofstream{ log_file_name, std::ios::binary | std::ios::app };
     file.write(line, strlen(line));
     file.put('\n');
     file.flush();
 };
 
-static auto dump_data(uintptr_t base) noexcept {
+static auto dump_data(std::uintptr_t base) {
     auto const handle = GetCurrentProcess();
     char raw[1024] = {};
     assert(ReadProcessMemory(handle, (void const*)base, raw, sizeof(raw), nullptr));
@@ -56,103 +61,98 @@ static auto dump_data(uintptr_t base) noexcept {
     assert(dos->e_magic == IMAGE_DOS_SIGNATURE);
     auto const nt = (PIMAGE_NT_HEADERS32)(raw + dos->e_lfanew);
     assert(nt->Signature == IMAGE_NT_SIGNATURE);
-    auto const size = (size_t)(nt->OptionalHeader.SizeOfImage);
-    auto result = std::vector<char>();
-    result.resize(size);
-    for (size_t i = 0; i < size; i += 0x1000) {
-        ReadProcessMemory(handle, (void const*)(base + i), result.data() + i, 0x1000, nullptr);
+    auto const size = (std::size_t)(nt->OptionalHeader.SizeOfImage);
+    auto data = std::vector<char>();
+    data.resize(size);
+    for (std::size_t i = 0; i < size; i += 0x1000) {
+        ReadProcessMemory(handle, (void const*)(base + i), data.data() + i, 0x1000, nullptr);
     }
-    return result;
+    return data;
 }
 
-static uintptr_t find_call(std::vector<char> const& data, std::string_view pat) noexcept {
-    auto pat_begin = pat.data();
-    auto pat_end = pat.data() + pat.size();
-    auto data_begin = data.data();
-    auto data_end = data.data() + data.size();
-    auto const i = std::search(data_begin, data_end, std::boyer_moore_horspool_searcher(pat_begin, pat_end));
-    if (i == data_end) {
-        return 0u;
-    }
-    auto offset = int32_t{0};
-    memcpy(&offset, i + pat.size(), sizeof(offset));
-    auto const result = (int32_t)((i - data_begin) + pat.size() + sizeof(offset));
-    return (uintptr_t)(result + offset);
-}
-
-static std::string load_pattern_from_file() {
-    std::string result = {};
-    if (auto file = fopen("C:/Riot Games/ssl_keylog_pattern.txt", "rb")) {
-        for (uint32_t number = 0; fscanf(file, "%02X", &number) == 1; ) {
-            result.push_back((char)(uint8_t)number);
-        }
-        fclose(file);
-    }
-    return result;
-}
-
-static std::string load_pattern() {
-    auto from_file = load_pattern_from_file();
-    if (!from_file.empty()) {
-        return from_file;
-    } else {
-        if constexpr (sizeof(void*) == 4) {
-            return "\xFF\x74\x24\x40\xFF\x73\x04\xE8";
-        } else {
-            return "\x8B\x54\x24\x78\x48\x8B\x49\x08\xE8";
+static auto find_offsets(std::uintptr_t base) {
+    struct Offsets {
+        std::ptrdiff_t nss_keylog_int = {};
+        std::ptrdiff_t ssl_ctx = {};
+        std::ptrdiff_t keylog_callback = {};
+    };
+    auto const data = dump_data(base);
+    for (auto const& p: patterns) {
+        std::cmatch result;
+        if (std::regex_search(data.data(), data.data() + data.size(), result, p)) {
+            std::int32_t ssl_ctx;
+            std::memcpy(&ssl_ctx, result[1].first, sizeof(ssl_ctx));
+            std::int32_t keylog_callback;
+            std::memcpy(&keylog_callback, result[2].first, sizeof(keylog_callback));
+            return Offsets { result.position(), ssl_ctx, keylog_callback };
         }
     }
+    return Offsets {};
 }
 
-static auto find_set_set_fd(std::vector<char> const& data) noexcept {
-    static std::string pattern = load_pattern();
-    return find_call(data, pattern);
-}
-
-template<size_t I>
+template<std::size_t I>
 static bool hook_module(char const* name) noexcept {
-    using ssl_set_fd_t = void(*)(SSL* s, int fd);
-    auto const base = (uintptr_t)GetModuleHandleA(name);
+    static std::uintptr_t base = 0;
+    if (base) {
+        return true;
+    }
+    base = (std::uintptr_t)GetModuleHandleA(name);
     if (!base) {
         return false;
     }
-    auto const data = dump_data(base);
-    auto const offset = find_set_set_fd(data);
-    assert(offset != 0);
-    auto const target = (ssl_set_fd_t)(base + offset);
-    static ssl_set_fd_t org = nullptr;
-    static ssl_set_fd_t hook = [](SSL* ssl, int fd) {
-        assert(ssl->ctx);
-        assert(!ssl->ctx->keylog_callback || ssl->ctx->keylog_callback == keylog_callback);
-        ssl->ctx->keylog_callback = keylog_callback;
-        org(ssl, fd);
+    using nss_keylog_int_t = int(*)(const char *prefix,
+                                    char *ssl,
+                                    const uint8_t *parameter_1,
+                                    size_t parameter_1_len,
+                                    const uint8_t *parameter_2,
+                                    size_t parameter_2_len);
+    using keylog_callback_t = void(*)(char* ssl, char const* line);
+    static auto const off = find_offsets(base);
+    assert(off.nss_keylog_int != 0);
+    assert(off.ssl_ctx != 0);
+    assert(off.keylog_callback != 0);
+    auto const target = (nss_keylog_int_t)(base + off.nss_keylog_int);
+    static nss_keylog_int_t org = nullptr;
+    static nss_keylog_int_t hook = [](const char *prefix,
+                                      char *ssl,
+                                      const uint8_t *parameter_1,
+                                      size_t parameter_1_len,
+                                      const uint8_t *parameter_2,
+                                      size_t parameter_2_len) -> int {
+        assert(ssl);
+        auto ctx = *(char**)(ssl + off.ssl_ctx);
+        assert(ctx);
+        *(keylog_callback_t*)(ctx + off.keylog_callback) = log_func;
+        return org(prefix, ssl, parameter_1, parameter_1_len, parameter_2, parameter_2_len);
     };
     assert(MH_CreateHook((void*)target, (void*)hook, (void**)&org) == MH_OK);
     assert(MH_EnableHook((void*)target) == MH_OK);
     return true;
 }
 
-template<size_t I>
-static void hook_module_wait(char const* module_name, uint32_t time, uint32_t interval = 50) noexcept {
-    auto thread = std::thread([=]{
-        uint32_t elapsed = 0;
-        while (!hook_module<I>(module_name)) {
-            elapsed += interval;
-            if (time && elapsed >= time) {
-                break;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(interval));
-        }
-    });
-    thread.detach();
+template<std::size_t I = 0>
+static bool hook_all_modules_impl() {
+    if constexpr(I != sizeof(modules) / sizeof(modules[0])) {
+        return hook_module<I>(modules[I]) && hook_all_modules_impl<I + 1>();
+    } else {
+        return true;
+    }
 }
 
 BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         assert(MH_Initialize() == MH_OK);
-        hook_module<0>(nullptr);
-        hook_module_wait<1>("Foundation.dll", 30000);
-        hook_module_wait<2>("FoundationMobile.dll", 30000);
+        auto thread = std::thread([=]{
+            std::uint32_t elapsed = 0;
+            while (!hook_all_modules_impl()) {
+                elapsed += modules_wait_interval;
+                if (modules_wait_time && elapsed >= modules_wait_time) {
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(modules_wait_interval));
+            }
+        });
+        thread.detach();
     }
     return TRUE;
 }

@@ -16,5 +16,3 @@ add_library(ssl_key_dump SHARED
     )
 target_include_directories(ssl_key_dump PRIVATE minhook/include)
 target_link_libraries(ssl_key_dump User32)
-
-add_executable(print_ssl_offsets print_ssl_offsets.cpp)
