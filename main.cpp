@@ -4,8 +4,8 @@
 #include <mutex>
 #include <regex>
 #include <thread>
+#include <list>
 #include <vector>
-#include "MinHook.h"
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -19,33 +19,9 @@
 #define assert(what) do { if (!(what)) { MessageBoxA(nullptr, #what, __func__, MB_ICONERROR); exit(1); } } while(false)
 
 /// Config
+using long_t = long;
 
-static std::regex patterns[] = {
-    #if UINTPTR_MAX > 0xFFFFFFFFF
-    std::regex { R"(\x40\x57)"
-                 R"(\x41\x55)"
-                 R"(\x41\x56)"
-                 R"(\x41\x57)"
-                 R"(.{4,20})"
-                 R"(\x48\x8B\x82(....))"
-                 R"(\x4D\x8B\xF1)"
-                 R"(\x4D\x8B\xF8)"
-                 R"(\x4C\x8B\xEA)"
-                 R"(\x48\x8B\xF9)"
-                 R"(\x48\x83\xB8(....)\x00)"
-                 R"(\x75\x11)"
-    },
-    #else
-    std::regex { R"(\x55)"
-                 R"(\x8B\xEC)"
-                 R"(.{3,21})"
-                 R"(\x8B\x45\x0C)"
-                 R"(\x8B\x80(....))"
-                 R"(\x83\xB8(....))"
-                 R"(\x00\x75\x09)"
-    },
-    #endif
-};
+constexpr inline auto log_file_name = "C:/Riot Games/ssl_keylog.txt";
 
 static char const* modules[] = {
     nullptr,
@@ -57,11 +33,79 @@ constexpr inline auto modules_wait_interval = 50;
 
 constexpr inline auto modules_wait_time = 30000;
 
-constexpr inline auto log_file_name = "C:/Riot Games/ssl_keylog.txt";
+static std::vector<std::regex> patterns_keylog_callback  {
+#if UINTPTR_MAX > 0xFFFFFFFF
+    std::regex {
+        R"(\x40\x57)"
+        R"(\x41\x55)"
+        R"(\x41\x56)"
+        R"(\x41\x57)"
+        R"(.{4,20})"
+        R"(\x48\x8B\x82....)"
+        R"(\x4D\x8B\xF1)"
+        R"(\x4D\x8B\xF8)"
+        R"(\x4C\x8B\xEA)"
+        R"(\x48\x8B\xF9)"
+        R"(\x48\x83\xB8(....)\x00)"
+        R"(\x75\x11)"
+    },
+#else
+    std::regex {
+        R"(\x55)"
+        R"(\x8B\xEC)"
+        R"(.{3,21})"
+        R"(\x8B\x45\x0C)"
+        R"(\x8B\x80....)"
+        R"(\x83\xB8(....))"
+        R"(\x00\x75\x09)"
+    },
+#endif
+};
+
+static std::vector<std::regex> patterns_CRYPTO_get_ex_new_index = {
+#if UINTPTR_MAX > 0xFFFFFFFF
+    std::regex {
+        R"(\x48\x89\x5C\x24\x28)"
+        R"(\x8D\x48\xD5)"
+        R"(\x45\x33\xC9)"
+        R"(\x48\x89\x5C\x24\x20)"
+        R"(\x33\xD2)"
+        R"(\xE8(....))"
+    },
+    std::regex {
+        R"(\x48\x89\x5C\x24\x28)"
+        R"(\x45\x33\xC9)"
+        R"(\x33\xD2 )"
+        R"(\x48\x89\x5C\x24\x20)"
+        R"(\x8D\x48\xD5)"
+        R"(\xE8(....))"
+    },
+#else
+    std::regex {
+        R"(\x6A\x00)"
+        R"(\x6A\x00)"
+        R"(\x6A\x00)"
+        R"(\x68....)"
+        R"(\x6A\x00)"
+        R"(\x6A\x05)"
+        R"(\xE8(....))"
+    },
+#endif
+};
+
+/// Typedefs
+constexpr inline auto CRYPTO_EX_INDEX_SSL_CTX = 1;
+
+typedef void (* keylog_callback_t) (char* ssl, char const* line);
+
+typedef void (* CRYPTO_EX_new_t) (char* parent, void *ptr, void *ad, int idx, long_t argl, void *argp);
+
+typedef int (* CRYPTO_get_ex_new_index_t) (int class_index, long_t argl, void* argp,
+                                           CRYPTO_EX_new_t new_func, void* dup_func, void* free_func);
 
 /// Hooking
 
-static void log_func(char*, char const* line) {
+static auto log_func(char*, char const* line) noexcept -> void {
     static auto mutex = std::mutex{};
     auto lock = std::lock_guard<std::mutex>{ mutex };
     static auto file = std::ofstream{ log_file_name, std::ios::binary | std::ios::app };
@@ -70,7 +114,11 @@ static void log_func(char*, char const* line) {
     file.flush();
 };
 
-static auto dump_data(std::uintptr_t base) {
+static auto CRYPTO_EX_new(char* parent, void *, void *, int, long_t argl, void *) noexcept -> void {
+    *(keylog_callback_t*)(parent + argl) = &log_func;
+}
+
+static auto dump_data(std::uintptr_t base) noexcept -> std::vector<char> {
     auto const handle = GetCurrentProcess();
     char raw[1024] = {};
     assert(ReadProcessMemory(handle, (void const*)base, raw, sizeof(raw), nullptr));
@@ -87,89 +135,71 @@ static auto dump_data(std::uintptr_t base) {
     return data;
 }
 
-static auto find_offsets(std::uintptr_t base) {
-    struct Offsets {
-        std::ptrdiff_t nss_keylog_int = {};
-        std::ptrdiff_t ssl_ctx = {};
-        std::ptrdiff_t keylog_callback = {};
-    };
-    auto const data = dump_data(base);
-    for (auto const& p: patterns) {
-        std::cmatch result;
+static auto find_keylog_callback_off(std::vector<char> const& data) noexcept -> std::uint32_t {
+    std::cmatch result;
+    for (auto const& p: patterns_keylog_callback) {
         if (std::regex_search(data.data(), data.data() + data.size(), result, p)) {
-            std::int32_t ssl_ctx;
-            std::memcpy(&ssl_ctx, result[1].first, sizeof(ssl_ctx));
-            std::int32_t keylog_callback;
-            std::memcpy(&keylog_callback, result[2].first, sizeof(keylog_callback));
-            return Offsets { result.position(), ssl_ctx, keylog_callback };
+            std::uint32_t buffer;
+            std::memcpy(&buffer, result[1].first, sizeof(buffer));
+            return buffer;
         }
     }
-    return Offsets {};
+    return 0;
 }
 
-template<std::size_t I>
-static bool hook_module(char const* name) noexcept {
-    static std::uintptr_t base = 0;
-    if (base) {
-        return true;
+static auto find_CRYPTO_get_ex_new_index(std::vector<char> const& data) noexcept -> std::uintptr_t {
+    std::cmatch result;
+    for (auto const& p: patterns_CRYPTO_get_ex_new_index) {
+        if (std::regex_search(data.data(), data.data() + data.size(), result, p)) {
+            std::int32_t buffer;
+            std::memcpy(&buffer, result[1].first, sizeof(buffer));
+            auto const offset = (std::uintptr_t)(result[1].second - data.data());
+            return offset + buffer;
+        }
     }
-    base = (std::uintptr_t)GetModuleHandleA(name);
+    return 0;
+}
+
+static auto hook_module(char const* name) noexcept -> bool {
+    auto const base = (std::uintptr_t)GetModuleHandleA(name);
     if (!base) {
         return false;
     }
-    using nss_keylog_int_t = int(*)(const char *prefix,
-                                    char *ssl,
-                                    const uint8_t *parameter_1,
-                                    size_t parameter_1_len,
-                                    const uint8_t *parameter_2,
-                                    size_t parameter_2_len);
-    using keylog_callback_t = void(*)(char* ssl, char const* line);
-    static auto const off = find_offsets(base);
-    assert(off.nss_keylog_int != 0);
-    assert(off.ssl_ctx != 0);
-    assert(off.keylog_callback != 0);
-    auto const target = (nss_keylog_int_t)(base + off.nss_keylog_int);
-    static nss_keylog_int_t org = nullptr;
-    static nss_keylog_int_t hook = [](const char *prefix,
-                                      char *ssl,
-                                      const uint8_t *parameter_1,
-                                      size_t parameter_1_len,
-                                      const uint8_t *parameter_2,
-                                      size_t parameter_2_len) -> int {
-        assert(ssl);
-        auto ctx = *(char**)(ssl + off.ssl_ctx);
-        assert(ctx);
-        *(keylog_callback_t*)(ctx + off.keylog_callback) = log_func;
-        return org(prefix, ssl, parameter_1, parameter_1_len, parameter_2, parameter_2_len);
-    };
-    assert(MH_CreateHook((void*)target, (void*)hook, (void**)&org) == MH_OK);
-    assert(MH_EnableHook((void*)target) == MH_OK);
+    auto const data = dump_data(base);
+    auto const keylog_callback_off = find_keylog_callback_off(data);
+    assert(keylog_callback_off != 0);
+    auto const CRYPTO_get_ex_new_index_off = find_CRYPTO_get_ex_new_index(data);
+    assert(CRYPTO_get_ex_new_index_off != 0);
+    auto const CRYPTO_get_ex_new_index = (CRYPTO_get_ex_new_index_t)(base + CRYPTO_get_ex_new_index_off);
+    CRYPTO_get_ex_new_index(CRYPTO_EX_INDEX_SSL_CTX, keylog_callback_off, nullptr, CRYPTO_EX_new, nullptr, nullptr);
     return true;
 }
 
-template<std::size_t I = 0>
-static bool hook_all_modules_impl() {
-    if constexpr(I != sizeof(modules) / sizeof(modules[0])) {
-        return hook_module<I>(modules[I]) && hook_all_modules_impl<I + 1>();
-    } else {
-        return true;
-    }
+static auto run() -> void {
+    auto thread = std::thread([]{
+        std::uint32_t elapsed = 0;
+        std::list<char const*> unhooked = { std::begin(modules), std::end(modules) };
+        while (!unhooked.empty()) {
+            for (auto i = unhooked.begin(); i != unhooked.end(); ) {
+                if (hook_module(*i)) {
+                    i = unhooked.erase(i);
+                } else {
+                    ++i;
+                }
+            }
+            elapsed += modules_wait_interval;
+            if (modules_wait_time && elapsed >= modules_wait_time) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(modules_wait_interval));
+        }
+    });
+    thread.detach();
 }
 
 BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
-        assert(MH_Initialize() == MH_OK);
-        auto thread = std::thread([=]{
-            std::uint32_t elapsed = 0;
-            while (!hook_all_modules_impl()) {
-                elapsed += modules_wait_interval;
-                if (modules_wait_time && elapsed >= modules_wait_time) {
-                    break;
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(modules_wait_interval));
-            }
-        });
-        thread.detach();
+        run();
     }
     return TRUE;
 }
