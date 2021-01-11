@@ -56,8 +56,13 @@ static std::vector<std::regex> patterns_keylog_callback  {
         R"(.{3,21})"
         R"(\x8B\x45\x0C)"
         R"(\x8B\x80....)"
-        R"(\x83\xB8(....))"
-        R"(\x00\x75\x09)"
+        R"(\x83\xB8(....)\x00)"
+        R"(\x75\x09)"
+    },
+    std::regex {
+        R"(\x8B\x80....)"
+        R"(\x83\xB8(....)\x00)"
+        R"(\x75\x09)"
     },
 #endif
 };
