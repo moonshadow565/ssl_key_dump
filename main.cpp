@@ -1,5 +1,6 @@
 #include <chrono>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <mutex>
 #include <regex>
@@ -113,7 +114,15 @@ typedef int (* CRYPTO_get_ex_new_index_t) (int class_index, long_t argl, void* a
 static auto log_func(char*, char const* line) noexcept -> void {
     static auto mutex = std::mutex{};
     auto lock = std::lock_guard<std::mutex>{ mutex };
-    static auto file = std::ofstream{ log_file_name, std::ios::binary | std::ios::app };
+    static auto file = [] {
+        auto const output_dir = std::filesystem::path(log_file_name).parent_path();
+        if (!std::filesystem::exists(output_dir)) {
+            assert(std::filesystem::create_directories(output_dir));
+        }
+        auto file = std::ofstream{ log_file_name, std::ios::binary | std::ios::app };
+        assert(file.good());
+        return file;
+    }();
     file.write(line, strlen(line));
     file.put('\n');
     file.flush();
