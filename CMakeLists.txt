@@ -7,4 +7,4 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_definitions(-D_CRT_SECURE_NO_WARNINGS)
 add_library(ssl_key_dump SHARED main.cpp)
-target_link_libraries(ssl_key_dump User32)
+target_link_libraries(ssl_key_dump user32)
