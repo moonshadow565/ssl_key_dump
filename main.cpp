@@ -37,11 +37,6 @@ constexpr inline auto modules_wait_time = 30000;
 static std::vector<std::regex> patterns_keylog_callback  {
 #if UINTPTR_MAX > 0xFFFFFFFF
     std::regex {
-        R"(\x40\x57)"
-        R"(\x41\x55)"
-        R"(\x41\x56)"
-        R"(\x41\x57)"
-        R"(.{4,20})"
         R"(\x48\x8B\x82....)"
         R"(\x4D\x8B\xF1)"
         R"(\x4D\x8B\xF8)"
@@ -50,11 +45,17 @@ static std::vector<std::regex> patterns_keylog_callback  {
         R"(\x48\x83\xB8(....)\x00)"
         R"(\x75\x11)"
     },
+    std::regex {
+        R"(\x48\x8B\x82....)"
+        R"(\x4D\x8B\xF1)"
+        R"(\x4D\x8B\xE0)"
+        R"(\x4C\x8B\xEA)"
+        R"(\x48\x8B\xF9)"
+        R"(\x48\x83\xB8(....)\x00)"
+        R"(\x75\x11)"
+    },
 #else
     std::regex {
-        R"(\x55)"
-        R"(\x8B\xEC)"
-        R"(.{3,21})"
         R"(\x8B\x45\x0C)"
         R"(\x8B\x80....)"
         R"(\x83\xB8(....)\x00)"
@@ -81,7 +82,7 @@ static std::vector<std::regex> patterns_CRYPTO_get_ex_new_index = {
     std::regex {
         R"(\x48\x89\x5C\x24\x28)"
         R"(\x45\x33\xC9)"
-        R"(\x33\xD2 )"
+        R"(\x33\xD2)"
         R"(\x48\x89\x5C\x24\x20)"
         R"(\x8D\x48\xD5)"
         R"(\xE8(....))"
