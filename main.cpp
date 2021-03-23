@@ -1,12 +1,14 @@
+#include "ppp.hpp"
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
-#include <regex>
 #include <thread>
 #include <list>
 #include <vector>
+
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -22,6 +24,7 @@
 /// Config
 using long_t = long;
 
+constexpr inline auto cache_dir = "C:/Riot Games/ssl_offset_cache";
 constexpr inline auto log_file_name = "C:/Riot Games/ssl_keylog.txt";
 
 static char const* modules[] = {
@@ -34,71 +37,24 @@ constexpr inline auto modules_wait_interval = 50;
 
 constexpr inline auto modules_wait_time = 30000;
 
-static std::vector<std::regex> patterns_keylog_callback  {
+constexpr auto find_keylog_callback = &ppp::any<
 #if UINTPTR_MAX > 0xFFFFFFFF
-    std::regex {
-        R"(\x48\x8B\x82....)"
-        R"(\x4D\x8B\xF1)"
-        R"(\x4D\x8B\xF8)"
-        R"(\x4C\x8B\xEA)"
-        R"(\x48\x8B\xF9)"
-        R"(\x48\x83\xB8(....)\x00)"
-        R"(\x75\x11)"
-    },
-    std::regex {
-        R"(\x48\x8B\x82....)"
-        R"(\x4D\x8B\xF1)"
-        R"(\x4D\x8B\xE0)"
-        R"(\x4C\x8B\xEA)"
-        R"(\x48\x8B\xF9)"
-        R"(\x48\x83\xB8(....)\x00)"
-        R"(\x75\x11)"
-    },
+        "48 8B 82 ?? ?? ?? ?? 4D 8B F1 4D 8B E0 4C 8B EA 48 8B F9 48 83 B8 u[?? ?? ?? ??] 00 75 11"_pattern,
+        "48 8B 82 ?? ?? ?? ?? 4D 8B F1 4D 8B F1 4C 8B EA 48 8B F9 48 83 B8 u[?? ?? ?? ??] 00 75 11"_pattern
 #else
-    std::regex {
-        R"(\x8B\x45\x0C)"
-        R"(\x8B\x80....)"
-        R"(\x83\xB8(....)\x00)"
-        R"(\x75\x09)"
-    },
-    std::regex {
-        R"(\x8B\x80....)"
-        R"(\x83\xB8(....)\x00)"
-        R"(\x75\x09)"
-    },
+        "8B 45 0C 8B 80 ?? ?? ?? ?? 83 B8 u[?? ?? ?? ??] 00 75 09"_pattern,
+        "8B 80 ?? ?? ?? ?? 83 B8 u[?? ?? ?? ??] 00 75 09"_pattern
 #endif
-};
+        >;
 
-static std::vector<std::regex> patterns_CRYPTO_get_ex_new_index = {
+constexpr auto find_CRYPTO_get_ex_new_index = &ppp::any<
 #if UINTPTR_MAX > 0xFFFFFFFF
-    std::regex {
-        R"(\x48\x89\x5C\x24\x28)"
-        R"(\x8D\x48\xD5)"
-        R"(\x45\x33\xC9)"
-        R"(\x48\x89\x5C\x24\x20)"
-        R"(\x33\xD2)"
-        R"(\xE8(....))"
-    },
-    std::regex {
-        R"(\x48\x89\x5C\x24\x28)"
-        R"(\x45\x33\xC9)"
-        R"(\x33\xD2)"
-        R"(\x48\x89\x5C\x24\x20)"
-        R"(\x8D\x48\xD5)"
-        R"(\xE8(....))"
-    },
+        "48 89 5C 24 28 8D 48 D5 45 33 C9 48 89 5C 24 20 33 D2 E8 r[?? ?? ?? ??]"_pattern,
+        "48 89 5C 24 28 45 33 C9 33 D2 48 89 5C 24 20 8D 48 D5 E8 r[?? ?? ?? ??]"_pattern
 #else
-    std::regex {
-        R"(\x6A\x00)"
-        R"(\x6A\x00)"
-        R"(\x6A\x00)"
-        R"(\x68....)"
-        R"(\x6A\x00)"
-        R"(\x6A\x05)"
-        R"(\xE8(....))"
-    },
+        "6A 00 6A 00 6A 00 68 ?? ?? ?? ?? 6A 00 6A 05 E8 r[?? ?? ?? ??]"_pattern
 #endif
-};
+        >;
 
 /// Typedefs
 constexpr inline auto CRYPTO_EX_INDEX_SSL_CTX = 1;
@@ -133,60 +89,106 @@ static auto CRYPTO_EX_new(char* parent, void *, void *, int, long_t argl, void *
     *(keylog_callback_t*)(parent + argl) = &log_func;
 }
 
-static auto dump_data(std::uintptr_t base) noexcept -> std::vector<char> {
-    auto const handle = GetCurrentProcess();
-    char raw[1024] = {};
-    assert(ReadProcessMemory(handle, (void const*)base, raw, sizeof(raw), nullptr));
-    auto const dos = (PIMAGE_DOS_HEADER)(raw);
-    assert(dos->e_magic == IMAGE_DOS_SIGNATURE);
-    auto const nt = (PIMAGE_NT_HEADERS32)(raw + dos->e_lfanew);
-    assert(nt->Signature == IMAGE_NT_SIGNATURE);
-    auto const size = (std::size_t)(nt->OptionalHeader.SizeOfImage);
-    auto data = std::vector<char>();
-    data.resize(size);
-    for (std::size_t i = 0; i < size; i += 0x1000) {
-        ReadProcessMemory(handle, (void const*)(base + i), data.data() + i, 0x1000, nullptr);
-    }
-    return data;
-}
+struct Offsets {
+    uint32_t checksum = {};
+    uint32_t keylog_callback = {};
+    uint32_t get_ex_new_index = {};
 
-static auto find_keylog_callback_off(std::vector<char> const& data) noexcept -> std::uint32_t {
-    std::cmatch result;
-    for (auto const& p: patterns_keylog_callback) {
-        if (std::regex_search(data.data(), data.data() + data.size(), result, p)) {
-            std::uint32_t buffer;
-            std::memcpy(&buffer, result[1].first, sizeof(buffer));
-            return buffer;
-        }
-    }
-    return 0;
-}
+    static Offsets scan(HMODULE module) {
+        auto result = Offsets{};
+        // Scratch buffer
+        char buffer[0x1000] = {};
 
-static auto find_CRYPTO_get_ex_new_index(std::vector<char> const& data) noexcept -> std::uintptr_t {
-    std::cmatch result;
-    for (auto const& p: patterns_CRYPTO_get_ex_new_index) {
-        if (std::regex_search(data.data(), data.data() + data.size(), result, p)) {
-            std::int32_t buffer;
-            std::memcpy(&buffer, result[1].first, sizeof(buffer));
-            auto const offset = (std::uintptr_t)(result[1].second - data.data());
-            return offset + buffer;
+        // Get file name of current module
+        GetModuleFileNameA(module, buffer, sizeof(buffer));
+        auto const filename =  std::filesystem::path(buffer).filename().replace_extension(".txt");
+        auto const cachedir = std::filesystem::path(cache_dir);
+        auto const cachepath = (cachedir / filename).generic_string();
+
+        // Load offsets from cache if any
+        if (auto file = fopen(cachepath.c_str(), "rb")) {
+            fscanf(file, "v1 %08X %08X %08X",
+                   &result.checksum, &result.keylog_callback, &result.get_ex_new_index);
+            fclose(file);
         }
+
+        // Extract PE header information of module
+        auto const handle = GetCurrentProcess();
+        auto const base = reinterpret_cast<std::uintptr_t>(module);
+        assert(ReadProcessMemory(handle, reinterpret_cast<LPVOID>(base), buffer, 0x400, nullptr));
+        auto const dos = reinterpret_cast<PIMAGE_DOS_HEADER>(buffer);
+        assert(dos->e_magic == IMAGE_DOS_SIGNATURE);
+        auto const nt = reinterpret_cast<PIMAGE_NT_HEADERS32>(buffer + dos->e_lfanew);
+        assert(nt->Signature == IMAGE_NT_SIGNATURE);
+        auto const size = static_cast<std::uint32_t>(nt->OptionalHeader.SizeOfImage);
+        auto const newChecksum = static_cast<std::uint32_t>(nt->OptionalHeader.CheckSum);
+
+        // If checksum doesn't match we need to force rescan offsets
+        bool changed = false;
+        if (result.checksum != newChecksum) {
+            changed = true;
+            result.checksum = newChecksum;
+            result.keylog_callback = 0;
+            result.get_ex_new_index = 0;
+        }
+
+        std::uint32_t offset = 0;
+        std::uint32_t remain = size;
+        while (remain > 0 && (result.keylog_callback == 0 || result.get_ex_new_index == 0)) {
+            // We scan page by page since patterns are unlikely to cross page boundary
+            auto const page_size = std::min(remain, 0x1000u);
+            ReadProcessMemory(handle, reinterpret_cast<LPVOID>(base + offset), buffer, page_size, nullptr);
+
+            auto const view = std::span<char const> { buffer, page_size };
+            if (result.keylog_callback == 0) {
+                if (auto const found = find_keylog_callback(view, offset)) {
+                    result.keylog_callback = std::get<1>(*found);
+                    changed = true;
+                }
+            }
+            if (result.get_ex_new_index == 0) {
+                if (auto const found = find_CRYPTO_get_ex_new_index(view, offset)) {
+                    result.get_ex_new_index = static_cast<std::uint32_t>(std::get<1>(*found));
+                    changed = true;
+                }
+            }
+
+            offset += page_size;
+            remain -= page_size;
+        }
+
+        // If we found any offsets store them in cache
+        if (changed) {
+            if (!std::filesystem::exists(cachedir)) {
+                std::error_code ec = {};
+                std::filesystem::create_directories(cachedir, ec);
+            }
+
+            if (auto file = fopen(cachepath.c_str(), "wb")) {
+                fprintf(file, "v1 %08X %08X %08X",
+                        result.checksum, result.keylog_callback, result.get_ex_new_index);
+                fclose(file);
+            }
+        }
+
+        return result;
     }
-    return 0;
-}
+};
 
 static auto hook_module(char const* name) noexcept -> bool {
-    auto const base = (std::uintptr_t)GetModuleHandleA(name);
-    if (!base) {
+    auto const module = GetModuleHandleA(name);
+    if (!module) {
         return false;
     }
-    auto const data = dump_data(base);
-    auto const keylog_callback_off = find_keylog_callback_off(data);
-    assert(keylog_callback_off != 0);
-    auto const CRYPTO_get_ex_new_index_off = find_CRYPTO_get_ex_new_index(data);
-    assert(CRYPTO_get_ex_new_index_off != 0);
-    auto const CRYPTO_get_ex_new_index = (CRYPTO_get_ex_new_index_t)(base + CRYPTO_get_ex_new_index_off);
-    CRYPTO_get_ex_new_index(CRYPTO_EX_INDEX_SSL_CTX, keylog_callback_off, nullptr, CRYPTO_EX_new, nullptr, nullptr);
+
+    auto const off = Offsets::scan(module);
+    assert(off.keylog_callback != 0);
+    assert(off.get_ex_new_index != 0);
+
+    auto const base = reinterpret_cast<std::uintptr_t>(module);
+    auto const get_ex_new_index = reinterpret_cast<CRYPTO_get_ex_new_index_t>(base + off.get_ex_new_index);
+    get_ex_new_index(CRYPTO_EX_INDEX_SSL_CTX, off.keylog_callback, nullptr, CRYPTO_EX_new, nullptr, nullptr);
+
     return true;
 }
 
