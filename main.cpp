@@ -132,14 +132,22 @@ struct Offsets {
             result.get_ex_new_index = 0;
         }
 
-        std::uint32_t offset = 0;
+        // We scan page by page since patterns are unlikely to cross page boundary
         std::uint32_t remain = size;
         while (remain > 0 && (result.keylog_callback == 0 || result.get_ex_new_index == 0)) {
-            // We scan page by page since patterns are unlikely to cross page boundary
-            auto const page_size = std::min(remain, 0x1000u);
-            ReadProcessMemory(handle, reinterpret_cast<LPVOID>(base + offset), buffer, page_size, nullptr);
+            // Scanning in reverse so we don't have to track offset in separate variable
+            auto const page_size = remain % 0x1000 ? remain % 0x1000 : 0x1000;
+            auto const offset = remain - page_size;
+            auto const address = reinterpret_cast<char const*>(base + offset);
+            remain -= page_size;
 
-            auto const view = std::span<char const> { buffer, page_size };
+            // Skip any bad pages
+            if (IsBadReadPtr(address, page_size)) {
+                continue;
+            }
+
+            // Scan view of memory
+            auto const view = std::span<char const> { address, page_size };
             if (result.keylog_callback == 0) {
                 if (auto const found = find_keylog_callback(view, offset)) {
                     result.keylog_callback = std::get<1>(*found);
@@ -152,9 +160,6 @@ struct Offsets {
                     changed = true;
                 }
             }
-
-            offset += page_size;
-            remain -= page_size;
         }
 
         // If we found any offsets store them in cache
