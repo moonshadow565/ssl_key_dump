@@ -97,10 +97,10 @@ struct Offsets {
     static Offsets scan(HMODULE module) {
         auto result = Offsets{};
         // Scratch buffer
-        char buffer[0x1000] = {};
+        char buffer[0x2000] = {};
 
         // Get file name of current module
-        GetModuleFileNameA(module, buffer, sizeof(buffer));
+        GetModuleFileNameA(module, buffer, 0x1000);
         auto const filename =  std::filesystem::path(buffer).filename().replace_extension(".txt");
         auto const cachedir = std::filesystem::path(cache_dir);
         auto const cachepath = (cachedir / filename).generic_string();
@@ -120,7 +120,10 @@ struct Offsets {
         assert(dos->e_magic == IMAGE_DOS_SIGNATURE);
         auto const nt = reinterpret_cast<PIMAGE_NT_HEADERS32>(buffer + dos->e_lfanew);
         assert(nt->Signature == IMAGE_NT_SIGNATURE);
-        auto const size = static_cast<std::uint32_t>(nt->OptionalHeader.SizeOfImage);
+        auto const baseOfCode = static_cast<std::uint32_t>(nt->OptionalHeader.BaseOfCode);
+        auto const sizeOfCode = static_cast<std::uint32_t>(nt->OptionalHeader.SizeOfCode);
+        auto const size = baseOfCode + sizeOfCode;
+        // auto const size = static_cast<std::uint32_t>(nt->OptionalHeader.SizeOfImage);
         auto const newChecksum = static_cast<std::uint32_t>(nt->OptionalHeader.CheckSum);
 
         // If checksum doesn't match we need to force rescan offsets
@@ -132,30 +135,32 @@ struct Offsets {
             result.get_ex_new_index = 0;
         }
 
-        // We scan page by page since patterns are unlikely to cross page boundary
         std::uint32_t remain = size;
+        std::memset(buffer, 0, 0x2000);
         while (remain > 0 && (result.keylog_callback == 0 || result.get_ex_new_index == 0)) {
-            // Scanning in reverse so we don't have to track offset in separate variable
+            // We need to scan in reverse because we are reading page by page
             auto const page_size = remain % 0x1000 ? remain % 0x1000 : 0x1000;
             auto const offset = remain - page_size;
             auto const address = reinterpret_cast<char const*>(base + offset);
             remain -= page_size;
 
-            // Skip any bad pages
+            // Copy previous page to upper part of buffer
+            std::memcpy(buffer + 0x1000, buffer, 0x1000);
             if (IsBadReadPtr(address, page_size)) {
                 continue;
             }
+            // Read new page in lower part of buffer
+            std::memcpy(buffer, address, page_size);
 
-            // Scan view of memory
-            auto const view = std::span<char const> { address, page_size };
+            // Scan this page + previous page
             if (result.keylog_callback == 0) {
-                if (auto const found = find_keylog_callback(view, offset)) {
+                if (auto const found = find_keylog_callback(buffer, offset)) {
                     result.keylog_callback = std::get<1>(*found);
                     changed = true;
                 }
             }
             if (result.get_ex_new_index == 0) {
-                if (auto const found = find_CRYPTO_get_ex_new_index(view, offset)) {
+                if (auto const found = find_CRYPTO_get_ex_new_index(buffer, offset)) {
                     result.get_ex_new_index = static_cast<std::uint32_t>(std::get<1>(*found));
                     changed = true;
                 }
