@@ -1,6 +1,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 #include "ppp.hpp"
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -97,7 +98,7 @@ struct Offsets {
     }
 };
 
-static auto WINAPI HookModuleThread(LPVOID) noexcept -> DWORD {
+static auto WINAPI HookModuleThread(LPVOID arg) noexcept -> DWORD {
     auto const moduleName = (char const*)arg;
     auto elapsed = MODULE_WAIT_TIME;
     while (elapsed > 0) {
