@@ -1,5 +1,6 @@
 #include <cstdint>
 #include <cstddef>
+#include <cstdio>
 #include "ppp.hpp"
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -96,34 +97,35 @@ struct Offsets {
     }
 };
 
-static void HookModule(char const* moduleName) noexcept {
-    constexpr auto thread_func = [] (LPVOID arg) noexcept -> DWORD {
-        auto const moduleName = (char const*)arg;
-        auto elapsed = MODULE_WAIT_TIME;
-        while (elapsed > 0) {
-            auto const module = GetModuleHandleA(moduleName);
-            if (!module) {
-                Sleep(MODULE_WAIT_INTERVAL);
-                elapsed -= MODULE_WAIT_INTERVAL;
-                continue;
-            }
-            auto const base = reinterpret_cast<std::uintptr_t>(module);
-            auto const off = Offsets(base);
-            if (!off.keylog_callback) {
-                ShowError("!off.keylog_callback", moduleName);
-                break;
-            }
-            if (!off.get_ex_new_index) {
-                ShowError("!off.get_ex_new_index", moduleName);
-                break;
-            }
-            auto const get_ex_new_index = reinterpret_cast<CRYPTO_get_ex_new_index_t>(base + off.get_ex_new_index);
-            get_ex_new_index(CRYPTO_EX_INDEX_SSL_CTX, off.keylog_callback, nullptr, CRYPTO_EX_new, nullptr, nullptr);
+static auto WINAPI HookModuleThread(LPVOID) noexcept -> DWORD {
+    auto const moduleName = (char const*)arg;
+    auto elapsed = MODULE_WAIT_TIME;
+    while (elapsed > 0) {
+        auto const module = GetModuleHandleA(moduleName);
+        if (!module) {
+            Sleep(MODULE_WAIT_INTERVAL);
+            elapsed -= MODULE_WAIT_INTERVAL;
+            continue;
+        }
+        auto const base = reinterpret_cast<std::uintptr_t>(module);
+        auto const off = Offsets(base);
+        if (!off.keylog_callback) {
+            ShowError("!off.keylog_callback", moduleName);
             break;
         }
-        return 0;
-    };
-    CreateThread(nullptr, 0, thread_func, (LPVOID)moduleName, 0, nullptr);
+        if (!off.get_ex_new_index) {
+            ShowError("!off.get_ex_new_index", moduleName);
+            break;
+        }
+        auto const get_ex_new_index = reinterpret_cast<CRYPTO_get_ex_new_index_t>(base + off.get_ex_new_index);
+        get_ex_new_index(CRYPTO_EX_INDEX_SSL_CTX, off.keylog_callback, nullptr, CRYPTO_EX_new, nullptr, nullptr);
+        break;
+    }
+    return 0;
+}
+
+static void HookModule(char const* moduleName) noexcept {
+    CreateThread(nullptr, 0, HookModuleThread, (LPVOID)moduleName, 0, nullptr);
 }
 
 auto WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) noexcept -> BOOL {
